@@ -205,6 +205,40 @@
   .history-item .ok { color: var(--green-dark); }
   .history-item .fail { color: var(--red); }
 
+  /* ---------- REPORTS SCREEN ---------- */
+  .report-controls {
+    display: flex; align-items: center; gap: 10px; margin-bottom: 18px; flex-wrap: wrap;
+  }
+  .report-controls label { font-size: 13px; font-weight: 600; }
+  .report-controls input[type="date"] {
+    padding: 9px 10px; font-size: 14px; border: 1px solid var(--border); border-radius: 7px;
+  }
+
+  .balance-cards { display: flex; gap: 10px; margin-bottom: 20px; }
+  .balance-card {
+    flex: 1; border: 1px solid var(--border); border-radius: 9px; padding: 12px 14px;
+  }
+  .balance-card .label { font-size: 11.5px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.03em; margin-bottom: 4px; }
+  .balance-card .value { font-size: 18px; font-weight: 700; }
+  .balance-card.missing .value { color: var(--text-muted); font-size: 13px; font-weight: 500; }
+
+  .stock-table { width: 100%; border-collapse: collapse; font-size: 13px; margin-bottom: 8px; }
+  .stock-table th {
+    text-align: left; padding: 8px 6px; border-bottom: 2px solid var(--text);
+    font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.02em; color: var(--text-muted);
+  }
+  .stock-table td { padding: 8px 6px; border-bottom: 1px solid #f0f0f0; }
+  .stock-table td.num { text-align: right; font-family: monospace; }
+  .stock-table tr.diff-positive td.diff { color: var(--green-dark); }
+  .stock-table tr.diff-negative td.diff { color: var(--red); }
+
+  .report-section-title {
+    font-size: 13px; font-weight: 700; color: var(--text-muted);
+    text-transform: uppercase; letter-spacing: 0.04em; margin: 22px 0 10px;
+  }
+
+  .download-btn-row { margin-top: 16px; }
+
   .section-title {
     font-size: 13px; font-weight: 700; color: var(--text-muted);
     text-transform: uppercase; letter-spacing: 0.04em; margin: 22px 0 10px;
@@ -247,6 +281,7 @@
     <div class="nav-tabs">
       <button class="nav-tab active" id="navSales" onclick="switchScreen('sales')">Sales</button>
       <button class="nav-tab" id="navPurchase" onclick="switchScreen('purchase')">Purchase</button>
+      <button class="nav-tab" id="navReports" onclick="switchScreen('reports')">Reports</button>
     </div>
 
     <!-- ---------- SALES SCREEN ---------- -->
@@ -287,6 +322,19 @@
       <div class="section-title">Recent entries (this session)</div>
       <div class="history-list" id="purchaseHistory">
         <div class="cart-empty">No entries yet this session</div>
+      </div>
+    </div>
+
+    <!-- ---------- REPORTS SCREEN ---------- -->
+    <div class="screen" id="screenReports">
+      <div class="report-controls">
+        <label for="reportDateInput">Report date</label>
+        <input type="date" id="reportDateInput" onchange="loadDailyReport()">
+        <button class="secondary" onclick="loadDailyReport()">Refresh</button>
+      </div>
+
+      <div id="reportContent">
+        <div class="cart-empty">Pick a date to view its opening &amp; closing report.</div>
       </div>
     </div>
   </div>
@@ -355,8 +403,8 @@ ${w}`}var A=class extends Error{constructor({message:e,code:r,cause:s,name:n}){v
    project URL and anon (public) key, found in your Supabase project
    under Settings -> API.
    ===================================================================== */
-const SUPABASE_URL = 'https://vllgmequanqwzgvlsxxs.supabase.co';
-const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZsbGdtZXF1YW5xd3pndmxzeHhzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODI3Mjg4OTAsImV4cCI6MjA5ODMwNDg5MH0.pVJZaRCXcahG6YycjM0bVcuLnTAIfPzsbXTIv_S-kcI';
+const SUPABASE_URL = 'https://YOUR-PROJECT-REF.supabase.co';
+const SUPABASE_ANON_KEY = 'YOUR-ANON-PUBLIC-KEY';
 
 const supabase = window.supabaseCreateClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
@@ -459,9 +507,20 @@ function enterMainApp() {
 function switchScreen(screen) {
   document.getElementById('navSales').classList.toggle('active', screen === 'sales');
   document.getElementById('navPurchase').classList.toggle('active', screen === 'purchase');
+  document.getElementById('navReports').classList.toggle('active', screen === 'reports');
   document.getElementById('screenSales').classList.toggle('active', screen === 'sales');
   document.getElementById('screenPurchase').classList.toggle('active', screen === 'purchase');
-  focusActiveScanInput();
+  document.getElementById('screenReports').classList.toggle('active', screen === 'reports');
+
+  if (screen === 'reports') {
+    const dateInput = document.getElementById('reportDateInput');
+    if (!dateInput.value) {
+      dateInput.value = new Date().toISOString().slice(0, 10);
+      loadDailyReport();
+    }
+  } else {
+    focusActiveScanInput();
+  }
 }
 
 function focusActiveScanInput() {
@@ -787,6 +846,162 @@ function renderPurchaseHistory() {
       <span class="${entry.ok ? 'ok' : 'fail'}">${entry.ok ? 'Saved' : 'Failed: ' + escapeHtml(entry.message || '')}</span>
     </div>
   `).join('');
+}
+
+/* ---------------------------------------------------------------------
+   REPORTS — opening/closing stock + cash account balance for one day,
+   pulled from the daily_opening_closing_report() database function.
+   --------------------------------------------------------------------- */
+let lastLoadedReport = null; // kept in memory so the CSV download button can reuse it without a second fetch
+
+async function loadDailyReport() {
+  const dateInput = document.getElementById('reportDateInput');
+  const reportDate = dateInput.value;
+  const container = document.getElementById('reportContent');
+
+  if (!reportDate) return;
+
+  container.innerHTML = '<div class="cart-empty">Loading report...</div>';
+
+  try {
+    const { data, error } = await supabase.rpc('daily_opening_closing_report', {
+      p_center_id: currentProfile.center_id,
+      p_report_date: reportDate
+    });
+
+    if (error) {
+      container.innerHTML = '<div class="alert error" style="display:block;">Could not load report: ' + escapeHtml(error.message) + '</div>';
+      return;
+    }
+
+    lastLoadedReport = data;
+    renderDailyReport(data);
+
+  } catch (e) {
+    container.innerHTML = '<div class="alert error" style="display:block;">Unexpected error: ' + escapeHtml(e.message) + '</div>';
+  }
+}
+
+function renderDailyReport(report) {
+  const container = document.getElementById('reportContent');
+
+  const openingBalanceHtml = report.account_entry_exists
+    ? 'Rs ' + Number(report.account_opening_balance).toFixed(2)
+    : 'Not entered';
+  const closingBalanceHtml = (report.account_entry_exists && report.account_closing_balance != null)
+    ? 'Rs ' + Number(report.account_closing_balance).toFixed(2)
+    : 'Not entered';
+
+  // Merge opening and closing stock lists by product, so each row shows
+  // both figures side by side even if a product only appears in one list
+  // (e.g. a brand new product with no opening stock yet).
+  const productMap = {};
+  (report.opening_stock || []).forEach(row => {
+    productMap[row.product_id] = { name: row.product_name, sku: row.sku, opening: row.quantity, closing: 0 };
+  });
+  (report.closing_stock || []).forEach(row => {
+    if (!productMap[row.product_id]) {
+      productMap[row.product_id] = { name: row.product_name, sku: row.sku, opening: 0, closing: row.quantity };
+    } else {
+      productMap[row.product_id].closing = row.quantity;
+    }
+  });
+  const stockRows = Object.values(productMap).sort((a, b) => a.name.localeCompare(b.name));
+
+  const stockRowsHtml = stockRows.length === 0
+    ? '<tr><td colspan="4" style="text-align:center; color:#999; padding:16px 0;">No stock activity for this date.</td></tr>'
+    : stockRows.map(row => {
+        const diff = row.closing - row.opening;
+        const diffClass = diff > 0 ? 'diff-positive' : (diff < 0 ? 'diff-negative' : '');
+        const diffLabel = diff > 0 ? ('+' + diff) : diff;
+        return `
+          <tr class="${diffClass}">
+            <td>${escapeHtml(row.name)}<br><span style="color:#999; font-size:11px;">${escapeHtml(row.sku)}</span></td>
+            <td class="num">${Number(row.opening).toFixed(2)}</td>
+            <td class="num">${Number(row.closing).toFixed(2)}</td>
+            <td class="num diff">${diffLabel}</td>
+          </tr>
+        `;
+      }).join('');
+
+  container.innerHTML = `
+    <div class="report-section-title">Cash account balance</div>
+    <div class="balance-cards">
+      <div class="balance-card ${report.account_entry_exists ? '' : 'missing'}">
+        <div class="label">Opening balance</div>
+        <div class="value">${openingBalanceHtml}</div>
+      </div>
+      <div class="balance-card ${(report.account_entry_exists && report.account_closing_balance != null) ? '' : 'missing'}">
+        <div class="label">Closing balance</div>
+        <div class="value">${closingBalanceHtml}</div>
+      </div>
+    </div>
+
+    <div class="report-section-title">Stock — opening vs closing</div>
+    <table class="stock-table">
+      <thead>
+        <tr>
+          <th>Product</th>
+          <th style="text-align:right;">Opening qty</th>
+          <th style="text-align:right;">Closing qty</th>
+          <th style="text-align:right;">Change</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${stockRowsHtml}
+      </tbody>
+    </table>
+
+    <div class="download-btn-row">
+      <button class="secondary" onclick="downloadReportCsv()">Download as CSV</button>
+    </div>
+  `;
+}
+
+function downloadReportCsv() {
+  if (!lastLoadedReport) return;
+  const report = lastLoadedReport;
+
+  const lines = [];
+  lines.push('VSDham Opening & Closing Report');
+  lines.push('Date,' + report.report_date);
+  lines.push('');
+  lines.push('Account Balance');
+  lines.push('Opening Balance,' + (report.account_entry_exists ? report.account_opening_balance : 'Not entered'));
+  lines.push('Closing Balance,' + ((report.account_entry_exists && report.account_closing_balance != null) ? report.account_closing_balance : 'Not entered'));
+  lines.push('');
+  lines.push('Stock — Opening vs Closing');
+  lines.push('Product,SKU,Opening Qty,Closing Qty,Change');
+
+  const productMap = {};
+  (report.opening_stock || []).forEach(row => {
+    productMap[row.product_id] = { name: row.product_name, sku: row.sku, opening: row.quantity, closing: 0 };
+  });
+  (report.closing_stock || []).forEach(row => {
+    if (!productMap[row.product_id]) {
+      productMap[row.product_id] = { name: row.product_name, sku: row.sku, opening: 0, closing: row.quantity };
+    } else {
+      productMap[row.product_id].closing = row.quantity;
+    }
+  });
+  Object.values(productMap)
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .forEach(row => {
+      const diff = row.closing - row.opening;
+      // Wrap product/SKU in quotes in case they contain commas.
+      lines.push('"' + row.name.replace(/"/g, '""') + '","' + row.sku.replace(/"/g, '""') + '",' + row.opening + ',' + row.closing + ',' + diff);
+    });
+
+  const csvContent = lines.join('\r\n');
+  const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = 'vsdham_report_' + report.report_date + '.csv';
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
 }
 
 /* ---------------------------------------------------------------------
