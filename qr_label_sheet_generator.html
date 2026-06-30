@@ -442,22 +442,54 @@ function reportFailures(failedCodes) {
 }
 
 // If opened with ?code=...&name=..., pre-fill the input with that single
-// product instead of the sample data (used when linking here directly
-// from the Product Master screen after saving a new product).
+// product instead of the sample data. If opened with ?items=[...] (a
+// JSON array of {code, name} pairs), pre-fill with ALL of them at once —
+// used when linking here from the Product Master's "Print QR" (single)
+// or "Print QR for selected" (bulk, multi-product) buttons. ?mode=A or
+// ?mode=B switches to that tab before generating, so the handoff lands
+// on the right mode automatically instead of defaulting to Sticker mode.
 function applyUrlPrefill() {
   const params = new URLSearchParams(window.location.search);
+  const mode = params.get('mode');
+  const itemsParam = params.get('items');
   const code = params.get('code');
   const name = params.get('name');
-  if (code) {
+
+  let prefilled = false;
+
+  if (itemsParam) {
+    try {
+      const items = JSON.parse(itemsParam);
+      if (Array.isArray(items) && items.length > 0) {
+        const lines = items
+          .filter(it => it && it.code)
+          .map(it => it.code + ' | ' + (it.name || it.code));
+        if (lines.length > 0) {
+          document.getElementById('productInput').value = lines.join(String.fromCharCode(10));
+          prefilled = true;
+        }
+      }
+    } catch (e) {
+      // Malformed ?items= — fall through and leave the sample data in
+      // place rather than crashing the page over a bad URL parameter.
+      console.warn('Could not parse items parameter from URL:', e.message);
+    }
+  } else if (code) {
     document.getElementById('productInput').value = code + ' | ' + (name || code);
-    return true;
+    prefilled = true;
   }
-  return false;
+
+  if (mode === 'A' || mode === 'B') {
+    switchMode(mode);
+    return true; // switchMode already calls generateSheets()
+  }
+
+  return prefilled;
 }
 
 window.addEventListener('DOMContentLoaded', function() {
-  applyUrlPrefill();
-  generateSheets();
+  const handledGeneration = applyUrlPrefill();
+  if (!handledGeneration) generateSheets();
 });
 </script>
 
