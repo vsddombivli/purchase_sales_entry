@@ -77,7 +77,22 @@
 
   .item-card {
     border: 1px solid var(--border); border-radius: 9px; padding: 13px 15px; margin-bottom: 10px;
-    display: flex; justify-content: space-between; align-items: center; cursor: pointer;
+    display: flex; justify-content: space-between; align-items: center; gap: 10px;
+  }
+  .item-card .checkbox-col { flex: 0 0 auto; }
+  .item-card .checkbox-col input { width: 18px; height: 18px; cursor: pointer; }
+  .item-card .main-info { flex: 1; min-width: 0; cursor: pointer; }
+  .item-card .actions-col { flex: 0 0 auto; display: flex; gap: 6px; align-items: center; }
+  .item-card .actions-col button.qr-btn {
+    background: var(--green-light); border: 1px solid var(--green); color: var(--green-dark);
+    font-size: 11.5px; font-weight: 700; padding: 5px 9px; border-radius: 6px; cursor: pointer;
+  }
+  .item-card .actions-col button.qr-btn:hover { background: #e0f0e6; }
+
+  .bulk-bar {
+    display: flex; align-items: center; gap: 12px;
+    background: var(--green-light); border: 1px solid var(--green);
+    border-radius: 8px; padding: 10px 14px; margin-bottom: 12px; font-size: 13px;
   }
   .item-card:hover { border-color: var(--green); background: var(--green-light); }
   .item-card .main-info .name { font-size: 14.5px; font-weight: 700; }
@@ -149,6 +164,7 @@
 
     <div class="nav-tabs">
       <button class="nav-tab active" id="navProducts" onclick="switchScreen('products')">Products</button>
+      <button class="nav-tab" id="navCategories" onclick="switchScreen('categories')">Categories</button>
       <button class="nav-tab" id="navVendors" onclick="switchScreen('vendors')">Vendors</button>
     </div>
 
@@ -159,7 +175,27 @@
         <button class="primary" onclick="openNewProductForm()">+ Add product</button>
       </div>
       <div id="productFormContainer"></div>
+      <div class="bulk-bar" id="bulkPrintBar" style="display:none;">
+        <span id="bulkSelectedCount"></span>
+        <button class="secondary" onclick="printSelectedProducts()">Print QR for selected</button>
+        <button class="link" onclick="clearProductSelection()">Clear selection</button>
+      </div>
       <div id="productListContainer"><div class="empty-state">Loading...</div></div>
+    </div>
+
+    <!-- ---------- CATEGORIES SCREEN ---------- -->
+    <div class="screen" id="screenCategories">
+      <div class="list-header">
+        <h2>Categories</h2>
+        <button class="primary" onclick="openNewCategoryForm()">+ Add category</button>
+      </div>
+      <div class="hint" style="margin-bottom:14px;">
+        Every product belongs to a category, and shelf life is set per category
+        (not per product) — e.g. all "Snacks" share the same seasonal shelf-life
+        rules, all "Sweets" share their own, and so on.
+      </div>
+      <div id="categoryFormContainer"></div>
+      <div id="categoryListContainer"><div class="empty-state">Loading...</div></div>
     </div>
 
     <!-- ---------- VENDORS SCREEN ---------- -->
@@ -230,8 +266,8 @@ ${w}`}var A=class extends Error{constructor({message:e,code:r,cause:s,name:n}){v
    CONFIGURATION: replace these with your actual Supabase project URL
    and anon (public) key — Settings -> API in your Supabase project.
    ===================================================================== */
-const SUPABASE_URL = 'https://vllgmequanqwzgvlsxxs.supabase.co';
-const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZsbGdtZXF1YW5xd3pndmxzeHhzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODI3Mjg4OTAsImV4cCI6MjA5ODMwNDg5MH0.pVJZaRCXcahG6YycjM0bVcuLnTAIfPzsbXTIv_S-kcI';
+const SUPABASE_URL = 'https://YOUR-PROJECT-REF.supabase.co';
+const SUPABASE_ANON_KEY = 'YOUR-ANON-PUBLIC-KEY';
 
 const supabase = window.supabaseCreateClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
@@ -240,10 +276,13 @@ const supabase = window.supabaseCreateClient(SUPABASE_URL, SUPABASE_ANON_KEY);
    --------------------------------------------------------------------- */
 let currentProfile = null;
 let vendorsCache = [];     // all vendors for this center, refreshed on load/save
+let categoriesCache = [];  // all categories for this center
 let productsCache = [];    // all products for this center
 let editingProductId = null;  // null = creating new, else editing existing
 let editingVendorId = null;
-let currentSlabRows = [];     // working list of shelf-life slab rows while editing a product
+let editingCategoryId = null;
+let currentSlabRows = [];     // working list of shelf-life slab rows while editing a CATEGORY (moved from product)
+let selectedProductIds = new Set();  // checked products for bulk QR printing
 
 /* ---------------------------------------------------------------------
    LOGIN / LOGOUT  (same pattern as the entry app)
@@ -323,13 +362,15 @@ async function enterMainApp() {
   document.getElementById('mainApp').style.display = 'block';
   document.getElementById('centerLabel').textContent =
     currentProfile.full_name + (currentProfile.role === 'admin' ? ' (Admin)' : ' (SPOC)');
-  await Promise.all([loadVendors(), loadProducts()]);
+  await Promise.all([loadVendors(), loadCategories(), loadProducts()]);
 }
 
 function switchScreen(screen) {
   document.getElementById('navProducts').classList.toggle('active', screen === 'products');
+  document.getElementById('navCategories').classList.toggle('active', screen === 'categories');
   document.getElementById('navVendors').classList.toggle('active', screen === 'vendors');
   document.getElementById('screenProducts').classList.toggle('active', screen === 'products');
+  document.getElementById('screenCategories').classList.toggle('active', screen === 'categories');
   document.getElementById('screenVendors').classList.toggle('active', screen === 'vendors');
 }
 
@@ -487,12 +528,224 @@ function populateVendorDropdown() {
 }
 
 /* ---------------------------------------------------------------------
+   CATEGORIES — each category owns its own seasonal shelf-life slabs.
+   Every product must pick one category, and that decides its shelf life.
+   --------------------------------------------------------------------- */
+async function loadCategories() {
+  const { data, error } = await supabase
+    .from('categories')
+    .select('id, name, is_active')
+    .order('name', { ascending: true });
+
+  if (!error && data) {
+    categoriesCache = data;
+  }
+  renderCategoryList();
+  populateCategoryDropdown();
+}
+
+function renderCategoryList() {
+  const container = document.getElementById('categoryListContainer');
+  if (categoriesCache.length === 0) {
+    container.innerHTML = '<div class="empty-state">No categories yet. Add your first category above — e.g. "Snacks", "Sweets", "Pooja Items".</div>';
+    return;
+  }
+
+  container.innerHTML = categoriesCache.map(c => `
+    <div class="item-card ${c.is_active ? '' : 'inactive'}">
+      <div class="main-info" onclick="openEditCategoryForm('${c.id}')">
+        <div class="name">${escapeHtml(c.name)} ${c.is_active ? '' : '<span class="badge inactive">Inactive</span>'}</div>
+      </div>
+    </div>
+  `).join('');
+}
+
+function openNewCategoryForm() {
+  editingCategoryId = null;
+  currentSlabRows = [{ valid_from_mmdd: '', valid_to_mmdd: '', shelf_life_days: '' }];
+  renderCategoryForm({ name: '', is_active: true });
+}
+
+async function openEditCategoryForm(categoryId) {
+  const category = categoriesCache.find(c => c.id === categoryId);
+  if (!category) return;
+  editingCategoryId = categoryId;
+
+  const { data: slabs } = await supabase
+    .from('product_shelf_life_slabs')
+    .select('id, valid_from_mmdd, valid_to_mmdd, shelf_life_days')
+    .eq('category_id', categoryId)
+    .order('valid_from_mmdd', { ascending: true });
+
+  currentSlabRows = (slabs && slabs.length > 0)
+    ? slabs.map(s => ({ id: s.id, valid_from_mmdd: s.valid_from_mmdd, valid_to_mmdd: s.valid_to_mmdd, shelf_life_days: s.shelf_life_days }))
+    : [{ valid_from_mmdd: '', valid_to_mmdd: '', shelf_life_days: '' }];
+
+  renderCategoryForm(category);
+}
+
+function renderCategoryForm(c) {
+  const container = document.getElementById('categoryFormContainer');
+  const isEdit = !!editingCategoryId;
+
+  container.innerHTML = `
+    <div class="form-panel">
+      <h3>${isEdit ? 'Edit category' : 'Add new category'}</h3>
+      <div class="field">
+        <label for="cName">Category name *</label>
+        <input type="text" id="cName" value="${escapeAttr(c.name)}" placeholder="e.g. Snacks">
+      </div>
+
+      <div class="section-title">Shelf life (by season)</div>
+      <div class="hint" style="margin-bottom:10px;">
+        All products in this category share these rules. Dates repeat every
+        year (no year needed) — e.g. 03-01 to 06-15 → 15 days. For a
+        category that doesn't really expire, use one row covering the
+        whole year (01-01 to 12-31) with a long day count.
+      </div>
+      <div id="slabRowsContainer"></div>
+      <button class="link" onclick="addSlabRow()">+ Add another date range</button>
+
+      ${isEdit ? `
+      <div class="field" style="margin-top:16px;">
+        <label><input type="checkbox" id="cIsActive" ${c.is_active ? 'checked' : ''} style="width:auto; margin-right:6px;">Active</label>
+      </div>` : ''}
+
+      <div class="form-actions">
+        <button class="primary" onclick="saveCategory()">Save category</button>
+        <button class="secondary" onclick="closeCategoryForm()">Cancel</button>
+      </div>
+      <div class="alert error" id="categoryFormError"></div>
+      <div class="alert success" id="categoryFormSuccess"></div>
+    </div>
+  `;
+
+  renderSlabRows();
+  document.getElementById('cName').focus();
+}
+
+function closeCategoryForm() {
+  editingCategoryId = null;
+  currentSlabRows = [];
+  document.getElementById('categoryFormContainer').innerHTML = '';
+}
+
+function validateCategoryForm() {
+  const name = document.getElementById('cName').value.trim();
+  if (!name) return 'Category name is required.';
+
+  const validSlabs = currentSlabRows.filter(r => r.valid_from_mmdd || r.valid_to_mmdd || r.shelf_life_days);
+  if (validSlabs.length === 0) return 'At least one shelf-life date range is required.';
+
+  for (const row of validSlabs) {
+    if (!MMDD_PATTERN.test(row.valid_from_mmdd)) return 'Each "from" date must be in MM-DD format (e.g. 03-01).';
+    if (!MMDD_PATTERN.test(row.valid_to_mmdd)) return 'Each "to" date must be in MM-DD format (e.g. 06-15).';
+    const days = parseInt(row.shelf_life_days, 10);
+    if (isNaN(days) || days <= 0) return 'Each shelf-life entry needs a valid number of days (greater than 0).';
+  }
+
+  return null;
+}
+
+async function saveCategory() {
+  const errorBox = document.getElementById('categoryFormError');
+  const successBox = document.getElementById('categoryFormSuccess');
+  errorBox.style.display = 'none';
+  successBox.style.display = 'none';
+
+  const wasEdit = !!editingCategoryId; // capture before it gets reassigned below
+
+  const validationError = validateCategoryForm();
+  if (validationError) {
+    errorBox.textContent = validationError;
+    errorBox.style.display = 'block';
+    return;
+  }
+
+  const payload = { name: document.getElementById('cName').value.trim() };
+
+  const validSlabs = currentSlabRows
+    .filter(r => r.valid_from_mmdd || r.valid_to_mmdd || r.shelf_life_days)
+    .map(r => ({ valid_from_mmdd: r.valid_from_mmdd, valid_to_mmdd: r.valid_to_mmdd, shelf_life_days: parseInt(r.shelf_life_days, 10) }));
+
+  try {
+    let categoryId = editingCategoryId;
+
+    if (editingCategoryId) {
+      payload.is_active = document.getElementById('cIsActive').checked;
+      const { error } = await supabase.from('categories').update(payload).eq('id', editingCategoryId);
+      if (error) { errorBox.textContent = 'Could not save: ' + error.message; errorBox.style.display = 'block'; return; }
+
+      await supabase.from('product_shelf_life_slabs').delete().eq('category_id', editingCategoryId);
+    } else {
+      payload.center_id = currentProfile.center_id;
+      payload.created_by = currentProfile.id;
+      payload.is_active = true;
+      const { data: inserted, error } = await supabase.from('categories').insert(payload).select('id').single();
+      if (error) { errorBox.textContent = 'Could not save: ' + error.message; errorBox.style.display = 'block'; return; }
+      categoryId = inserted.id;
+    }
+
+    if (validSlabs.length > 0) {
+      const slabPayload = validSlabs.map(s => ({
+        category_id: categoryId,
+        valid_from_mmdd: s.valid_from_mmdd,
+        valid_to_mmdd: s.valid_to_mmdd,
+        shelf_life_days: s.shelf_life_days,
+        created_by: currentProfile.id
+      }));
+      const { error: slabError } = await supabase.from('product_shelf_life_slabs').insert(slabPayload);
+      if (slabError) {
+        errorBox.textContent = 'Category saved, but shelf-life slabs failed: ' + slabError.message;
+        errorBox.style.display = 'block';
+        return;
+      }
+    }
+
+    await loadCategories();
+    successBox.textContent = wasEdit ? 'Category updated.' : 'Category saved.';
+    successBox.style.display = 'block';
+    setTimeout(closeCategoryForm, 1000);
+
+  } catch (e) {
+    errorBox.textContent = 'Unexpected error: ' + e.message;
+    errorBox.style.display = 'block';
+  }
+}
+
+function populateCategoryDropdown() {
+  const select = document.getElementById('pCategory');
+  if (!select) return;
+  const activeCategories = categoriesCache.filter(c => c.is_active);
+  select.innerHTML = '<option value="">— Select category —</option>' +
+    activeCategories.map(c => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join('') +
+    '<option value="__new__">+ Add new category…</option>';
+}
+
+function handleCategoryDropdownChange(value) {
+  if (value === '__new__') {
+    const name = window.prompt('New category name (e.g. Snacks, Sweets, Pooja Items):');
+    if (!name || !name.trim()) {
+      document.getElementById('pCategory').value = '';
+      return;
+    }
+    // Switch to the Categories screen so the SPOC can set up shelf-life
+    // slabs for this new category right away — a product cannot be saved
+    // against a category with no shelf-life slabs defined yet.
+    switchScreen('categories');
+    openNewCategoryForm();
+    document.getElementById('cName').value = name.trim();
+    window.alert('Set up shelf life for "' + name.trim() + '" below, then come back to Products to finish adding your product — it will appear in the category dropdown once saved.');
+  }
+}
+
+/* ---------------------------------------------------------------------
    PRODUCTS
    --------------------------------------------------------------------- */
 async function loadProducts() {
   const { data, error } = await supabase
     .from('products')
-    .select('id, name, sku, category, unit, buying_price, selling_price, expiry_alert_days, qr_code_value, primary_vendor_id, is_active')
+    .select('id, name, sku, category_id, unit, buying_price, selling_price, expiry_alert_days, qr_code_value, primary_vendor_id, is_active')
     .order('name', { ascending: true });
 
   if (!error && data) {
@@ -509,8 +762,11 @@ function renderProductList() {
   }
 
   container.innerHTML = productsCache.map(p => `
-    <div class="item-card ${p.is_active ? '' : 'inactive'}" onclick="openEditProductForm('${p.id}')">
-      <div class="main-info">
+    <div class="item-card ${p.is_active ? '' : 'inactive'}">
+      <div class="checkbox-col">
+        <input type="checkbox" ${selectedProductIds.has(p.id) ? 'checked' : ''} onchange="toggleProductSelection('${p.id}', this.checked)">
+      </div>
+      <div class="main-info" onclick="openEditProductForm('${p.id}')">
         <div class="name">${escapeHtml(p.name)} ${p.is_active ? '' : '<span class="badge inactive">Inactive</span>'}</div>
         <div class="sub">${escapeHtml(p.sku)} · QR: ${escapeHtml(p.qr_code_value)}</div>
       </div>
@@ -518,34 +774,79 @@ function renderProductList() {
         <div class="price">Rs ${Number(p.selling_price).toFixed(2)}</div>
         <div class="sub">cost Rs ${Number(p.buying_price).toFixed(2)}</div>
       </div>
+      <div class="actions-col">
+        <button class="qr-btn" onclick="event.stopPropagation(); printSingleProductQr('${p.id}')">Print QR</button>
+      </div>
     </div>
   `).join('');
+
+  updateBulkPrintBar();
+}
+
+function toggleProductSelection(productId, checked) {
+  if (checked) {
+    selectedProductIds.add(productId);
+  } else {
+    selectedProductIds.delete(productId);
+  }
+  updateBulkPrintBar();
+}
+
+function clearProductSelection() {
+  selectedProductIds.clear();
+  renderProductList();
+}
+
+function updateBulkPrintBar() {
+  const bar = document.getElementById('bulkPrintBar');
+  const countLabel = document.getElementById('bulkSelectedCount');
+  if (selectedProductIds.size === 0) {
+    bar.style.display = 'none';
+    return;
+  }
+  bar.style.display = 'flex';
+  countLabel.textContent = selectedProductIds.size + ' product(s) selected';
+}
+
+function buildQrToolUrl(products) {
+  // Stage 2's QR tool (qr_label_sheet_generator.html) reads ?code=&name=
+  // for a single product (legacy single-product handoff), or ?items=
+  // as a JSON array of {code, name} pairs for multiple products at once.
+  // Multi-product is the general case (point 3): selecting N products
+  // here should produce all N on as few A4 sheets as possible, reusing
+  // Mode B (Rack/Catalog mode) already built in Stage 2.
+  if (products.length === 1) {
+    const p = products[0];
+    return 'qr_label_sheet_generator.html?mode=B&code=' + encodeURIComponent(p.qr_code_value) + '&name=' + encodeURIComponent(p.name);
+  }
+  const items = products.map(p => ({ code: p.qr_code_value, name: p.name }));
+  return 'qr_label_sheet_generator.html?mode=B&items=' + encodeURIComponent(JSON.stringify(items));
+}
+
+function printSingleProductQr(productId) {
+  const product = productsCache.find(p => p.id === productId);
+  if (!product) return;
+  window.open(buildQrToolUrl([product]), '_blank');
+}
+
+function printSelectedProducts() {
+  const selected = productsCache.filter(p => selectedProductIds.has(p.id));
+  if (selected.length === 0) return;
+  window.open(buildQrToolUrl(selected), '_blank');
 }
 
 function openNewProductForm() {
   editingProductId = null;
-  currentSlabRows = [{ valid_from_mmdd: '', valid_to_mmdd: '', shelf_life_days: '' }];
   renderProductForm({
-    name: '', sku: '', category: '', unit: 'pcs', buying_price: '', selling_price: '',
+    name: '', sku: '', category_id: '', unit: 'pcs', buying_price: '', selling_price: '',
     expiry_alert_days: 0, primary_vendor_id: '', is_active: true, qr_code_value: null
   });
 }
 
-async function openEditProductForm(productId) {
+function openEditProductForm(productId) {
   const product = productsCache.find(p => p.id === productId);
   if (!product) return;
   editingProductId = productId;
-
-  const { data: slabs } = await supabase
-    .from('product_shelf_life_slabs')
-    .select('id, valid_from_mmdd, valid_to_mmdd, shelf_life_days')
-    .eq('product_id', productId)
-    .order('valid_from_mmdd', { ascending: true });
-
-  currentSlabRows = (slabs && slabs.length > 0)
-    ? slabs.map(s => ({ id: s.id, valid_from_mmdd: s.valid_from_mmdd, valid_to_mmdd: s.valid_to_mmdd, shelf_life_days: s.shelf_life_days }))
-    : [{ valid_from_mmdd: '', valid_to_mmdd: '', shelf_life_days: '' }];
-
   renderProductForm(product);
 }
 
@@ -570,8 +871,9 @@ function renderProductForm(p) {
 
       <div class="form-row-2">
         <div class="field">
-          <label for="pCategory">Category</label>
-          <input type="text" id="pCategory" value="${escapeAttr(p.category || '')}" placeholder="e.g. Snacks">
+          <label for="pCategory">Category *</label>
+          <select id="pCategory" onchange="handleCategoryDropdownChange(this.value)"></select>
+          <div class="hint">Shelf life is set per category, not per product — manage it in the Categories tab.</div>
         </div>
         <div class="field">
           <label for="pUnit">Unit</label>
@@ -602,14 +904,6 @@ function renderProductForm(p) {
         </div>
       </div>
 
-      <div class="section-title">Shelf life (by season)</div>
-      <div class="hint" style="margin-bottom:10px;">
-        Define how many days this product lasts depending on when it's made/received.
-        Dates repeat every year (no year needed) — e.g. 03-01 to 06-15 → 15 days.
-      </div>
-      <div id="slabRowsContainer"></div>
-      <button class="link" onclick="addSlabRow()">+ Add another date range</button>
-
       ${isEdit ? `
       <div class="field" style="margin-top:16px;">
         <label><input type="checkbox" id="pIsActive" ${p.is_active ? 'checked' : ''} style="width:auto; margin-right:6px;">Active</label>
@@ -626,8 +920,9 @@ function renderProductForm(p) {
   `;
 
   populateVendorDropdown();
+  populateCategoryDropdown();
   if (p.primary_vendor_id) document.getElementById('pVendor').value = p.primary_vendor_id;
-  renderSlabRows();
+  if (p.category_id) document.getElementById('pCategory').value = p.category_id;
   document.getElementById('pName').focus();
 }
 
@@ -663,7 +958,6 @@ function updateSlabRow(idx, field, value) {
 
 function closeProductForm() {
   editingProductId = null;
-  currentSlabRows = [];
   document.getElementById('productFormContainer').innerHTML = '';
 }
 
@@ -672,23 +966,15 @@ const MMDD_PATTERN = /^(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$/;
 function validateProductForm() {
   const name = document.getElementById('pName').value.trim();
   const sku = document.getElementById('pSku').value.trim();
+  const categoryId = document.getElementById('pCategory').value;
   const buyingPrice = parseFloat(document.getElementById('pBuyingPrice').value);
   const sellingPrice = parseFloat(document.getElementById('pSellingPrice').value);
 
   if (!name) return 'Product name is required.';
   if (!sku) return 'SKU is required.';
+  if (!categoryId || categoryId === '__new__') return 'Please select a category (or add a new one).';
   if (isNaN(buyingPrice) || buyingPrice < 0) return 'Buying price must be a valid number.';
   if (isNaN(sellingPrice) || sellingPrice < 0) return 'Selling price must be a valid number.';
-
-  const validSlabs = currentSlabRows.filter(r => r.valid_from_mmdd || r.valid_to_mmdd || r.shelf_life_days);
-  if (validSlabs.length === 0) return 'At least one shelf-life date range is required.';
-
-  for (const row of validSlabs) {
-    if (!MMDD_PATTERN.test(row.valid_from_mmdd)) return 'Each "from" date must be in MM-DD format (e.g. 03-01).';
-    if (!MMDD_PATTERN.test(row.valid_to_mmdd)) return 'Each "to" date must be in MM-DD format (e.g. 06-15).';
-    const days = parseInt(row.shelf_life_days, 10);
-    if (isNaN(days) || days <= 0) return 'Each shelf-life entry needs a valid number of days (greater than 0).';
-  }
 
   return null;
 }
@@ -709,7 +995,7 @@ async function saveProduct() {
   const payload = {
     name: document.getElementById('pName').value.trim(),
     sku: document.getElementById('pSku').value.trim(),
-    category: document.getElementById('pCategory').value.trim() || null,
+    category_id: document.getElementById('pCategory').value,
     unit: document.getElementById('pUnit').value.trim() || 'pcs',
     buying_price: parseFloat(document.getElementById('pBuyingPrice').value),
     selling_price: parseFloat(document.getElementById('pSellingPrice').value),
@@ -717,23 +1003,13 @@ async function saveProduct() {
     primary_vendor_id: document.getElementById('pVendor').value || null,
   };
 
-  const validSlabs = currentSlabRows
-    .filter(r => r.valid_from_mmdd || r.valid_to_mmdd || r.shelf_life_days)
-    .map(r => ({ valid_from_mmdd: r.valid_from_mmdd, valid_to_mmdd: r.valid_to_mmdd, shelf_life_days: parseInt(r.shelf_life_days, 10) }));
-
   try {
-    let productId = editingProductId;
     let qrCodeValue = null;
 
     if (editingProductId) {
       payload.is_active = document.getElementById('pIsActive').checked;
       const { error } = await supabase.from('products').update(payload).eq('id', editingProductId);
       if (error) { errorBox.textContent = 'Could not save: ' + error.message; errorBox.style.display = 'block'; return; }
-
-      // Replace shelf-life slabs: delete existing, insert current set.
-      // (Simple and correct for the data volumes involved here — a handful
-      // of slabs per product — rather than diffing row-by-row.)
-      await supabase.from('product_shelf_life_slabs').delete().eq('product_id', editingProductId);
 
     } else {
       // New product: first get a fresh QR code value for this center, then insert.
@@ -748,24 +1024,8 @@ async function saveProduct() {
       payload.qr_code_value = qrCodeValue;
       payload.is_active = true; // explicit default for a newly created product
 
-      const { data: inserted, error } = await supabase.from('products').insert(payload).select('id').single();
+      const { error } = await supabase.from('products').insert(payload);
       if (error) { errorBox.textContent = 'Could not save: ' + error.message; errorBox.style.display = 'block'; return; }
-      productId = inserted.id;
-    }
-
-    if (validSlabs.length > 0) {
-      const slabPayload = validSlabs.map(s => ({
-        product_id: productId,
-        valid_from_mmdd: s.valid_from_mmdd,
-        valid_to_mmdd: s.valid_to_mmdd,
-        shelf_life_days: s.shelf_life_days,
-        created_by: currentProfile.id
-      }));
-      const { error: slabError } = await supabase.from('product_shelf_life_slabs').insert(slabPayload);
-      if (slabError) {
-        errorBox.textContent = 'Product saved, but shelf-life slabs failed: ' + slabError.message;
-        errorBox.style.display = 'block';
-      }
     }
 
     await loadProducts();
@@ -788,7 +1048,7 @@ async function saveProduct() {
 
 function showQrLink(code, name) {
   const box = document.getElementById('qrLinkBox');
-  const url = 'qr_label_sheet_generator.html?code=' + encodeURIComponent(code) + '&name=' + encodeURIComponent(name);
+  const url = buildQrToolUrl([{ qr_code_value: code, name: name }]);
   box.innerHTML = 'Ready to print labels for this product? <a href="' + url + '" target="_blank">Open QR Label Sheet Generator →</a>';
   box.style.display = 'block';
 }
