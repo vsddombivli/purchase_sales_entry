@@ -413,4 +413,139 @@ correctly through this app for a real SPOC account (already verified
 independently via direct SQL in Stage 1's testing, but worth a quick
 real check here too).
 
+---
+
+## Update: Categories, persistent QR printing, and an RLS bugfix
+
+Following real usage feedback after Stage 4, several changes were made:
+
+### RLS bugfix (run `003_categories_migration.sql`)
+Recording a sale was failing with an RLS error on `sale_allocations`.
+Root cause: `create_sale_with_fefo()` was not `SECURITY DEFINER`, so its
+internal insert into `sale_allocations` ran under the calling SPOC's own
+permissions — and that table had no INSERT policy granted to anyone,
+only SELECT. Fixed by making `create_sale_with_fefo()` and
+`create_stock_batch()` both `SECURITY DEFINER`; both already validate
+center-correctness internally (derived from the product, never trusted
+from caller input), so this does not weaken access control. **Confirmed
+fixed**: tested as a real (non-superuser) SPOC login — a sale that
+previously failed now succeeds and correctly creates the allocation row.
+
+### Shelf life is now per-category, not per-product
+Every product must belong to a category, and **shelf-life slabs now
+belong to the category**, not to individual products — so all "Snacks"
+share one set of seasonal rules, all "Sweets" share their own, etc.,
+exactly as requested. `003_categories_migration.sql` introduces a new
+`categories` table and automatically migrates your existing free-text
+`products.category` values and per-product slabs into this new
+structure.
+
+**Important post-migration step:** if two of your existing products
+shared a category name but had *different* shelf-life slabs, the
+migration preserves all of them under that one category rather than
+guessing which is correct — this was tested explicitly and confirmed.
+Open the new **Categories** tab in `vsdham_master_app.html` after
+running the migration and review each category's slabs, removing any
+duplicates/conflicts so each category has one clean, non-overlapping
+set of seasonal rules.
+
+### Product Master changes (`vsdham_master_app.html`)
+- **New "Categories" tab**: add/edit categories, each with its own
+  shelf-life slabs (the slab editor moved here from the product form).
+- **Product form**: category is now a dropdown of existing categories,
+  with a **"+ Add new category…"** option that switches to the
+  Categories tab, pre-fills the name you typed, and prompts you to set
+  up its shelf life before returning to finish the product — so a
+  category always has shelf-life rules before any product can use it.
+- **Persistent "Print QR" button** on every product row in the list —
+  this fixes the earlier issue where the QR link only appeared once,
+  right after creating a product, and disappeared on refresh.
+- **Checkbox selection + "Print QR for selected"**: select any number of
+  products and print all of their QR codes together, packed onto as few
+  A4 sheets as possible (reuses Stage 2's Rack/Catalog mode). Works for
+  a single product too (the per-row button) or all ~50-80 at once.
+
+### QR Label Sheet Generator changes (`qr_label_sheet_generator.html`)
+Now accepts a `?items=` URL parameter (a JSON array of `{code, name}`
+pairs) in addition to the earlier single-product `?code=&name=`, and a
+`?mode=A` or `?mode=B` parameter to land directly on the right tab. This
+is what powers the new bulk-print handoff from the Product Master.
+Tested: single product, multiple products (packed correctly into the
+fewest sheets), and a deliberately malformed `?items=` value (falls back
+gracefully to the sample data instead of crashing the page).
+
+### What was tested
+Same mock-based approach as before — added category creation with
+slabs, the category dropdown correctly listing saved categories, product
+save using the dropdown (confirmed no leftover shelf-life UI in the
+product form itself), the persistent QR button opening the correct URL,
+bulk selection building a correct multi-product URL, selection clearing
+correctly, and the full "add new category from product form" round trip
+(switches screen, pre-fills name, saves, then shows up in the dropdown
+back on the product form).
+
+---
+
+## Opening & Closing Report (`004_reports.sql` + Reports tab in `vsdham_entry_app.html`)
+
+### Schema: `stock_as_of()` and `daily_opening_closing_report()`
+`current_stock` only ever showed the *live* stock position — it had no
+way to answer "what was our stock at the start of last Tuesday." This
+migration adds:
+
+- **`stock_as_of(center_id, timestamp)`**: reconstructs per-product
+  stock quantity and cost value exactly as it stood at any point in
+  time, by working backward from each batch's original received
+  quantity minus whatever had been sold out of it (via
+  `sale_allocations`) strictly before that timestamp — rather than
+  trusting `quantity_remaining`, which only reflects right now.
+- **`daily_opening_closing_report(center_id, date)`**: a convenience
+  function combining opening stock (start of that date), closing stock
+  (end of that date, or right now if the date is today), and that day's
+  cash account opening/closing balance from `account_balances` — all in
+  one JSON result, which is what the Reports tab calls directly.
+
+**Tested with a controlled, backdated 2-day scenario** (received 50
+units, sold 20 on day one; received 10 more, sold 15 on day two):
+opening stock for day two correctly came back as exactly 30 units (50
+− 20), closing stock for day two correctly came back as exactly 25
+units (30 + 10 − 15) — confirmed the historical reconstruction is exact,
+not approximate. Also tested: a date with no account balance entry yet
+(correctly distinguishes "not entered" from "entered as zero"), and
+today's date (correctly uses the current moment as the closing cutoff
+rather than treating an unfinished day as if it had already ended).
+
+### Reports tab in the entry app
+- A date picker (defaulting to today) drives the whole screen — change
+  the date and the report reloads automatically.
+- Two cards show the day's cash account opening and closing balance,
+  clearly marked "Not entered" if no balance entry exists for that date
+  yet (rather than showing a misleading zero).
+- A table shows every product with stock activity that day, opening qty
+  next to closing qty next to the net change (colored green for a net
+  increase, red for a net decrease).
+- A **Download as CSV** button exports the same data as a clean,
+  Excel-readable file (verified the actual generated CSV content directly
+  in testing — correct headers, correctly quoted fields, accurate figures
+  matching what's shown on screen).
+
+### What was tested
+Switching to the Reports tab correctly auto-loads today's date and
+calls the database function with the right parameters; the balance
+cards and stock table render the returned figures accurately; changing
+the date picker correctly reloads with the new date; a report with no
+account entry and no stock activity at all renders gracefully instead of
+breaking; and the CSV download function produces well-formed, accurate
+output without crashing even when triggered with no real browser
+download mechanism available (as in this sandboxed test environment).
+
+**What still needs verification with your real project:** the real
+network round-trip and that a SPOC's RLS-scoped view of their own
+center's data flows through correctly into this report (the underlying
+tables' RLS was independently verified in Stage 1; this report's
+functions are read-only and rely on that same RLS, rather than
+bypassing it).
+
+
+
 
