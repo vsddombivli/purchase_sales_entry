@@ -5,13 +5,16 @@
 <title>VSDham — QR Label Sheet Generator</title>
 <style>
   :root {
-    --label-size: 30mm;      /* QR + text cell size — matches common 48-per-A4 sticker sheets (6 cols x 8 rows, ~30x30mm) */
-    --page-margin-top: 13mm;
+    --label-size: 30mm;      /* QR + text cell size — recalculated dynamically based on this value, see computeGridLayout() */
+    --page-margin-top: 10mm;
     --page-margin-left: 5mm;
+    --page-margin-right: 5mm;
+    --page-margin-bottom: 10mm;
     --col-gap: 2mm;
-    --row-gap: 0mm;
-    --cols: 6;
-    --rows: 8;
+    --row-gap: 2mm;
+    --cols: 6;   /* recalculated by JS on every generate, based on --label-size and A4 dimensions, so labels never overflow the page */
+    --rows: 8;   /* recalculated by JS on every generate */
+    --cell-border: 0.3mm solid #999;  /* toggled on/off by the "Print a border" checkbox */
   }
 
   * { box-sizing: border-box; }
@@ -46,7 +49,7 @@
   .controls .row { display: flex; gap: 16px; flex-wrap: wrap; }
   .controls .row > div { flex: 1; min-width: 160px; }
 
-  .controls button {
+  .controls button:not(.mode-tab) {
     margin-top: 20px;
     background: #1a6e3c;
     color: #fff;
@@ -57,7 +60,7 @@
     font-weight: 600;
     cursor: pointer;
   }
-  .controls button:hover { background: #155a31; }
+  .controls button:not(.mode-tab):hover { background: #155a31; }
   .controls button.secondary {
     background: #fff; color: #1a6e3c; border: 1px solid #1a6e3c; margin-left: 10px;
   }
@@ -84,18 +87,22 @@
     padding: 9px 16px;
     font-size: 13.5px;
     font-weight: 600;
-    color: #777;
-    background: none;
-    border: none;
-    border-bottom: 2.5px solid transparent;
+    color: #555;
+    background: #f4f4f4;
+    border: 1px solid #e0e0e0;
+    border-bottom: none;
+    border-radius: 6px 6px 0 0;
     cursor: pointer;
     margin-bottom: -1px;
   }
   .mode-tab.active {
     color: #1a6e3c;
-    border-bottom-color: #1a6e3c;
+    background: #fff;
+    border-color: #1a6e3c;
+    border-bottom: 2.5px solid #fff;
+    font-weight: 700;
   }
-  .mode-tab:hover { color: #1a6e3c; }
+  .mode-tab:not(.active):hover { color: #1a6e3c; background: #eef6f1; }
   .mode-desc {
     background: #f6f9f7;
     border: 1px solid #dce8e0;
@@ -114,9 +121,10 @@
     min-height: 297mm;
     background: #fff;
     margin: 16px auto;
-    padding: var(--page-margin-top) 0 0 var(--page-margin-left);
+    padding: var(--page-margin-top) var(--page-margin-right) var(--page-margin-bottom) var(--page-margin-left);
     box-shadow: 0 0 6px rgba(0,0,0,0.15);
     page-break-after: always;
+    box-sizing: border-box;
   }
 
   .page-title {
@@ -141,7 +149,8 @@
     align-items: center;
     justify-content: center;
     overflow: hidden;
-    border: 0.2mm dotted #ccc; /* visual cut-guide only; remove for final print if your sticker sheet already has die-cuts */
+    border: var(--cell-border); /* visible cut/alignment border around each label — prints by default, toggleable */
+    box-sizing: border-box;
     padding: 1mm;
   }
 
@@ -183,7 +192,6 @@
       min-height: 297mm;
     }
     .page-title { display: none; }
-    .cell { border: none; } /* cut-guides only useful on screen; hide on actual print */
     @page { size: A4; margin: 0; }
   }
 </style>
@@ -204,7 +212,7 @@
       Print, cut, and stick one label on each incoming packet as stock arrives.
     </div>
     <div class="mode-desc" id="modeDescB" style="display:none;">
-      <strong>Rack/Catalog mode:</strong> all your products together, one QR each, packed across as few A4 sheets as possible (48 per sheet).
+      <strong>Rack/Catalog mode:</strong> all your products together, one QR each, packed across as few A4 sheets as possible (the exact count per sheet depends on your label size below).
       Print once, cut out each product's QR, and stick it permanently on that product's rack/shelf —
       SPOC then scans the rack's QR at both stock-in and sale, instead of labelling every incoming packet.
     </div>
@@ -221,8 +229,16 @@ QR-DHOOP01 | Dhoop Sticks Pack</textarea>
     <div class="row">
       <div>
         <label for="labelSize">Label size (mm)</label>
-        <input type="text" id="labelSize" value="30">
-        <div class="hint">Match this to the sticker sheet you bought (e.g. 30 for 30×30mm 48-grid sheets). Same size used in both modes for reliable scanning.</div>
+        <input type="text" id="labelSize" value="30" onchange="updateGridPreview()">
+        <div class="hint" id="gridPreviewHint">Match this to the sticker sheet you bought (e.g. 30 for 30×30mm 48-grid sheets). Same size used in both modes for reliable scanning.</div>
+      </div>
+      <div>
+        <label for="showBorder">Label borders</label>
+        <label style="font-weight:400; display:flex; align-items:center; gap:6px; margin-top:6px;">
+          <input type="checkbox" id="showBorder" checked onchange="generateSheets()" style="width:auto;">
+          Print a border around each label
+        </label>
+        <div class="hint">Turn off if your sticker sheet already has its own die-cut/perforated lines.</div>
       </div>
     </div>
 
@@ -252,8 +268,35 @@ Minimum version required to store current data is: `+i+`.
 </script>
 
 <script>
-const CELLS_PER_PAGE = 48; // fixed: matches 6 cols x 8 rows = 48-grid A4 sticker sheets
 let currentMode = 'A'; // 'A' = sticker mode (1 product per sheet), 'B' = rack/catalog mode (all products mixed)
+let currentGrid = { cols: 6, rows: 8, cellsPerPage: 48 }; // recalculated by computeGridLayout() before every generate
+
+// A4 page is 210mm x 297mm. Margins and gaps are fixed (matching the CSS
+// variables); only cols/rows/cellsPerPage change based on label size, so
+// labels of any size always fit the page instead of silently overflowing
+// past the right/bottom edge (e.g. a fixed 6-column grid at 50mm would
+// need 300mm of width alone, which doesn't fit a 210mm-wide page).
+function computeGridLayout(labelSizeMM) {
+  const pageWidth = 210, pageHeight = 297;
+  const marginLeft = 5, marginRight = 5, marginTop = 10, marginBottom = 10;
+  const colGap = 2, rowGap = 2;
+
+  const usableWidth = pageWidth - marginLeft - marginRight;
+  const usableHeight = pageHeight - marginTop - marginBottom;
+
+  const cols = Math.max(1, Math.floor((usableWidth + colGap) / (labelSizeMM + colGap)));
+  const rows = Math.max(1, Math.floor((usableHeight + rowGap) / (labelSizeMM + rowGap)));
+
+  return { cols, rows, cellsPerPage: cols * rows };
+}
+
+function updateGridPreview() {
+  const labelSizeMM = parseFloat(document.getElementById('labelSize').value) || 30;
+  const grid = computeGridLayout(labelSizeMM);
+  const hint = document.getElementById('gridPreviewHint');
+  hint.textContent = 'At ' + labelSizeMM + 'mm, this fits ' + grid.cols + ' columns × ' + grid.rows +
+    ' rows = ' + grid.cellsPerPage + ' labels per A4 sheet. Match the size to your sticker sheet (e.g. 30 for common 30×30mm 48-grid sheets).';
+}
 
 function switchMode(mode) {
   currentMode = mode;
@@ -283,6 +326,15 @@ function generateSheets() {
   const labelSizeMM = parseFloat(document.getElementById('labelSize').value) || 30;
   document.documentElement.style.setProperty('--label-size', labelSizeMM + 'mm');
 
+  currentGrid = computeGridLayout(labelSizeMM);
+  document.documentElement.style.setProperty('--cols', currentGrid.cols);
+  document.documentElement.style.setProperty('--rows', currentGrid.rows);
+
+  const showBorder = document.getElementById('showBorder').checked;
+  document.documentElement.style.setProperty('--cell-border', showBorder ? '0.3mm solid #999' : 'none');
+
+  updateGridPreview();
+
   const products = parseProducts();
 
   if (products.length === 0) {
@@ -306,7 +358,7 @@ function generateSheets() {
 // ---------- MODE A: one product per sheet, repeated 48x (peel-and-stick on each packet) ----------
 function generateStickerSheets(products, sheetsContainer) {
   document.getElementById('productCount').textContent =
-    products.length + ' sheet(s) will be generated (1 per product, 48 labels each)';
+    products.length + ' sheet(s) will be generated (1 per product, ' + currentGrid.cellsPerPage + ' labels each)';
 
   let failedCodes = [];
 
@@ -316,7 +368,7 @@ function generateStickerSheets(products, sheetsContainer) {
 
     const title = document.createElement('div');
     title.className = 'page-title';
-    title.textContent = 'Sheet ' + (idx + 1) + ' of ' + products.length + ' — ' + product.name + ' (' + product.code + ') — 48 labels';
+    title.textContent = 'Sheet ' + (idx + 1) + ' of ' + products.length + ' — ' + product.name + ' (' + product.code + ') — ' + currentGrid.cellsPerPage + ' labels';
     page.appendChild(title);
 
     const grid = document.createElement('div');
@@ -325,7 +377,7 @@ function generateStickerSheets(products, sheetsContainer) {
     const qrBoxes = [];
 
     // Build all 48 cells FIRST (QR library callback can fire synchronously).
-    for (let i = 0; i < CELLS_PER_PAGE; i++) {
+    for (let i = 0; i < currentGrid.cellsPerPage; i++) {
       const cell = document.createElement('div');
       cell.className = 'cell';
 
@@ -365,9 +417,9 @@ function generateStickerSheets(products, sheetsContainer) {
 
 // ---------- MODE B: every product gets ONE QR, packed 48-per-sheet (rack/catalog labelling) ----------
 function generateCatalogSheets(products, sheetsContainer) {
-  const totalSheets = Math.ceil(products.length / CELLS_PER_PAGE);
+  const totalSheets = Math.ceil(products.length / currentGrid.cellsPerPage);
   document.getElementById('productCount').textContent =
-    products.length + ' product(s) across ' + totalSheets + ' sheet(s) (48 different products per sheet, 1 QR each)';
+    products.length + ' product(s) across ' + totalSheets + ' sheet(s) (' + currentGrid.cellsPerPage + ' different products per sheet, 1 QR each)';
 
   let failedCodes = [];
 
@@ -375,8 +427,8 @@ function generateCatalogSheets(products, sheetsContainer) {
     const page = document.createElement('div');
     page.className = 'page';
 
-    const startIdx = sheetIdx * CELLS_PER_PAGE;
-    const endIdx = Math.min(startIdx + CELLS_PER_PAGE, products.length);
+    const startIdx = sheetIdx * currentGrid.cellsPerPage;
+    const endIdx = Math.min(startIdx + currentGrid.cellsPerPage, products.length);
     const sheetProducts = products.slice(startIdx, endIdx);
 
     const title = document.createElement('div');
@@ -418,7 +470,7 @@ function generateCatalogSheets(products, sheetsContainer) {
     });
 
     // Fill any remaining cells on the last sheet so the grid stays visually complete.
-    const blanksNeeded = CELLS_PER_PAGE - sheetProducts.length;
+    const blanksNeeded = currentGrid.cellsPerPage - sheetProducts.length;
     for (let i = 0; i < blanksNeeded; i++) {
       const cell = document.createElement('div');
       cell.className = 'cell';
