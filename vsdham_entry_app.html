@@ -743,8 +743,14 @@ function setupPurchaseScanListener() {
       return;
     }
 
-    purchaseProduct = product;
-    renderPurchaseForm();
+    const existingQty = document.getElementById('qtyInput');
+    if (existingQty && purchaseProduct && product.id === purchaseProduct.id) {
+      existingQty.value = (parseFloat(existingQty.value) || 0) + 1;
+      document.getElementById('purchaseScanInput').focus();
+    } else {
+      purchaseProduct = product;
+      renderPurchaseForm();
+    }
   });
 }
 
