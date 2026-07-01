@@ -413,7 +413,7 @@ const supabase = window.supabaseCreateClient(SUPABASE_URL, SUPABASE_ANON_KEY);
    --------------------------------------------------------------------- */
 let currentProfile = null;   // { id, full_name, role, center_id }
 let salesCart = [];          // [{ product_id, name, selling_price, qty }]
-let purchaseProduct = null;  // currently scanned product awaiting mfg date + qty
+let purchaseCart = [];       // [{ product_id, name, unit, buying_price, mfgDate, qty }]
 let purchaseHistoryLog = []; // session-only log of purchase entries made
 
 /* ---------------------------------------------------------------------
@@ -484,7 +484,7 @@ async function handleLogout() {
   await supabase.auth.signOut();
   currentProfile = null;
   salesCart = [];
-  purchaseProduct = null;
+  purchaseCart = [];
   purchaseHistoryLog = [];
   document.getElementById('mainApp').style.display = 'none';
   document.getElementById('screenLogin').style.display = 'flex';
@@ -743,46 +743,72 @@ function setupPurchaseScanListener() {
       return;
     }
 
-    const existingQty = document.getElementById('qtyInput');
-    if (existingQty && purchaseProduct && product.id === purchaseProduct.id) {
-      existingQty.value = (parseFloat(existingQty.value) || 0) + 1;
-      document.getElementById('purchaseScanInput').focus();
+    const existingRow = purchaseCart.find(row => row.product_id === product.id);
+    if (existingRow) {
+      existingRow.qty += 1;
     } else {
-      purchaseProduct = product;
-      renderPurchaseForm();
+      const today = new Date().toISOString().slice(0, 10);
+      purchaseCart.push({
+        product_id: product.id,
+        name: product.name,
+        unit: product.unit,
+        buying_price: product.buying_price,
+        mfgDate: today,
+        qty: 1
+      });
     }
+    renderPurchaseForm();
   });
 }
-
 function renderPurchaseForm() {
   const container = document.getElementById('purchaseFormContainer');
-  if (!purchaseProduct) {
+  if (purchaseCart.length === 0) {
     container.innerHTML = '';
     return;
   }
 
-  const today = new Date().toISOString().slice(0, 10);
-
-  container.innerHTML = `
-    <div class="purchase-card">
-      <div class="name">${escapeHtml(purchaseProduct.name)}</div>
-      <div class="meta">Buying price: Rs ${purchaseProduct.buying_price.toFixed(2)} per ${escapeHtml(purchaseProduct.unit)}</div>
+  const cardsHtml = purchaseCart.map(row => `
+    <div class="purchase-card" data-product-id="${row.product_id}">
+      <div class="name">${escapeHtml(row.name)}</div>
+      <div class="meta">Buying price: Rs ${row.buying_price.toFixed(2)} per ${escapeHtml(row.unit)}</div>
       <div class="form-row">
         <div>
-          <label for="mfgDateInput">Manufacture / received date</label>
-          <input type="date" id="mfgDateInput" value="${today}">
+          <label for="mfgDateInput-${row.product_id}">Manufacture / received date</label>
+          <input type="date" id="mfgDateInput-${row.product_id}" value="${row.mfgDate}"
+            onchange="changePurchaseMfgDate('${row.product_id}', this.value)">
         </div>
         <div>
-          <label for="qtyInput">Quantity received</label>
-           <input type="number" id="qtyInput" min="1" step="1" value="1"
+          <label for="qtyInput-${row.product_id}">Quantity received</label>
+          <input type="number" id="qtyInput-${row.product_id}" min="1" step="1" value="${row.qty}"
+            onchange="changePurchaseQty('${row.product_id}', this.value)"
             onblur="document.getElementById('purchaseScanInput').focus()">
         </div>
       </div>
-      <button class="primary" onclick="savePurchaseBatch()">Save stock-in entry</button>
+      <button class="remove-btn" onclick="removePurchaseCartRow('${row.product_id}')">✕ Remove</button>
     </div>
+  `).join('');
+
+  container.innerHTML = cardsHtml + `
+    <button class="primary" onclick="savePurchaseBatch()">Save stock-in entr${purchaseCart.length > 1 ? 'ies' : 'y'}</button>
   `;
 
   document.getElementById('purchaseScanInput').focus();
+}
+
+function changePurchaseMfgDate(productId, value) {
+  const row = purchaseCart.find(r => r.product_id === productId);
+  if (row) row.mfgDate = value;
+}
+
+function changePurchaseQty(productId, value) {
+  const row = purchaseCart.find(r => r.product_id === productId);
+  if (!row) return;
+  const newQty = parseFloat(value);
+  row.qty = (isNaN(newQty) || newQty <= 0) ? 1 : newQty;
+}
+function removePurchaseCartRow(productId) {
+  purchaseCart = purchaseCart.filter(r => r.product_id !== productId);
+  renderPurchaseForm();
 }
 
 async function savePurchaseBatch() {
@@ -791,49 +817,53 @@ async function savePurchaseBatch() {
   errorBox.style.display = 'none';
   successBox.style.display = 'none';
 
-  const mfgDate = document.getElementById('mfgDateInput').value;
-  const qty = parseFloat(document.getElementById('qtyInput').value);
-
-  if (!mfgDate) {
-    errorBox.textContent = 'Please confirm the manufacture date.';
-    errorBox.style.display = 'block';
-    return;
-  }
-  if (isNaN(qty) || qty <= 0) {
-    errorBox.textContent = 'Please enter a valid quantity.';
+  const invalid = purchaseCart.find(row => !row.mfgDate || isNaN(row.qty) || row.qty <= 0);
+  if (invalid) {
+    errorBox.textContent = 'Please confirm a valid manufacture date and quantity for ' + invalid.name + '.';
     errorBox.style.display = 'block';
     return;
   }
 
-  try {
-    const { data, error } = await supabase.rpc('create_stock_batch', {
-      p_product_id: purchaseProduct.id,
-      p_vendor_id: null,
-      p_manufacture_date: mfgDate,
-      p_quantity: qty,
-      p_scanned_by: currentProfile.id
-    });
+  const results = [];
 
-    if (error) {
-      errorBox.textContent = 'Could not save: ' + error.message;
-      errorBox.style.display = 'block';
-      logPurchaseHistory(purchaseProduct.name, qty, mfgDate, false, error.message);
-      return;
+  for (const row of purchaseCart) {
+    try {
+      const { error } = await supabase.rpc('create_stock_batch', {
+        p_product_id: row.product_id,
+        p_vendor_id: null,
+        p_manufacture_date: row.mfgDate,
+        p_quantity: row.qty,
+        p_scanned_by: currentProfile.id
+      });
+      results.push({ row, ok: !error, message: error ? error.message : null });
+    } catch (e) {
+      results.push({ row, ok: false, message: e.message });
     }
-
-    successBox.textContent = 'Saved: ' + qty + ' x ' + purchaseProduct.name + ' (mfg ' + mfgDate + ')';
-    successBox.style.display = 'block';
-    logPurchaseHistory(purchaseProduct.name, qty, mfgDate, true, null);
-
-    purchaseProduct = null;
-    renderPurchaseForm();
-    document.getElementById('purchaseScanInput').focus();
-
-  } catch (e) {
-    errorBox.textContent = 'Unexpected error: ' + e.message;
-    errorBox.style.display = 'block';
-    logPurchaseHistory(purchaseProduct.name, qty, mfgDate, false, e.message);
+    logPurchaseHistory(row.name, row.qty, row.mfgDate, results[results.length - 1].ok, results[results.length - 1].message);
   }
+
+  const failed = results.filter(r => !r.ok);
+  const succeeded = results.filter(r => r.ok);
+
+  // Remove only the rows that were actually saved; keep failed ones in the
+  // cart so the SPOC can see what still needs fixing and resubmit.
+  const succeededIds = new Set(succeeded.map(r => r.row.product_id));
+  purchaseCart = purchaseCart.filter(row => !succeededIds.has(row.product_id));
+
+  if (failed.length === 0) {
+    successBox.textContent = 'Saved ' + succeeded.length + ' stock-in entr' + (succeeded.length > 1 ? 'ies' : 'y') + '.';
+    successBox.style.display = 'block';
+  } else {
+    errorBox.textContent = failed.map(f => f.row.name + ': ' + f.message).join(' | ');
+    errorBox.style.display = 'block';
+    if (succeeded.length > 0) {
+      successBox.textContent = succeeded.length + ' entr' + (succeeded.length > 1 ? 'ies' : 'y') + ' saved successfully.';
+      successBox.style.display = 'block';
+    }
+  }
+
+  renderPurchaseForm();
+  document.getElementById('purchaseScanInput').focus();
 }
 
 function logPurchaseHistory(name, qty, mfgDate, ok, message) {
