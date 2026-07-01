@@ -768,14 +768,15 @@ function renderPurchaseForm() {
         </div>
         <div>
           <label for="qtyInput">Quantity received</label>
-          <input type="number" id="qtyInput" min="1" step="1" value="1">
+           <input type="number" id="qtyInput" min="1" step="1" value="1"
+            onblur="document.getElementById('purchaseScanInput').focus()">
         </div>
       </div>
       <button class="primary" onclick="savePurchaseBatch()">Save stock-in entry</button>
     </div>
   `;
 
-  document.getElementById('qtyInput').focus();
+  document.getElementById('purchaseScanInput').focus();
 }
 
 async function savePurchaseBatch() {
